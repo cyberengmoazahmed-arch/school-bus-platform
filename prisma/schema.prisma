@@ -1,0 +1,735 @@
+// ============================================================================
+// SafeRide — School Bus Transportation Platform
+// Database schema (Prisma 7)
+//
+// NOTE: Enum values are modelled as String fields for portability across
+// SQLite (local dev) and PostgreSQL (production). The canonical values live in
+// src/lib/enums.ts and are validated at the application layer with Zod.
+// To switch to PostgreSQL set `provider = "postgresql"` in the datasource and
+// configure DATABASE_URL, then run `prisma migrate deploy`.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// ---------------------------------------------------------------------------
+// Identity & access
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String  @id @default(cuid())
+  email        String  @unique
+  phone        String  @unique
+  passwordHash String
+  role         String // PARENT | DRIVER | SCHOOL_ADMIN | SUPER_ADMIN | SUPPORT
+  fullName     String
+  avatarUrl    String?
+  locale       String  @default("en")
+  isActive     Boolean @default(true)
+
+  phoneVerified Boolean @default(false)
+  emailVerified Boolean @default(false)
+  mfaEnabled    Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  parentProfile       ParentProfile?
+  driverProfile       Driver?
+  schoolStaff         SchoolStaff[]
+  guardianLinks       GuardianRelationship[]
+  notifications       Notification[]
+  notificationPref    NotificationPreference?
+  ticketsRequested    SupportTicket[]        @relation("TicketRequester")
+  ticketsAssigned     SupportTicket[]        @relation("TicketAssignee")
+  ticketMessages      TicketMessage[]
+  subscriptions       Subscription[]         @relation("SubscriptionParent")
+  payments            Payment[]
+  invoices            Invoice[]
+  otpTokens           OtpToken[]
+  passwordResetTokens PasswordResetToken[]
+  auditLogs           AuditLog[]
+  incidentsReported   SafetyIncident[]       @relation("IncidentReporter")
+
+  @@index([role])
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  name        String
+  description String?
+  permissions String // JSON array of permission keys
+  createdAt   DateTime @default(now())
+}
+
+model ParentProfile {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  alternatePhone String?
+  addressText    String?
+  nationalId     String?
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model GuardianRelationship {
+  id        String   @id @default(cuid())
+  studentId String
+  userId    String
+  relation  String // MOTHER | FATHER | GUARDIAN | OTHER
+  isPrimary Boolean  @default(false)
+  canPickup Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, userId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Students, schools, addresses
+// ---------------------------------------------------------------------------
+
+model Address {
+  id      String  @id @default(cuid())
+  label   String?
+  line1   String
+  area    String?
+  city    String
+  lat     Float
+  lng     Float
+  notes   String?
+  createdAt DateTime @default(now())
+
+  students Student[]
+}
+
+model School {
+  id                String  @id @default(cuid())
+  name              String
+  code              String  @unique
+  addressText       String
+  area              String?
+  city              String
+  lat               Float
+  lng               Float
+  phone             String?
+  email             String?
+  arrivalWindowFrom String? // "07:15"
+  arrivalWindowTo   String? // "07:45"
+  dismissTime       String? // "14:30"
+  isActive          Boolean @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  students    Student[]
+  staff       SchoolStaff[]
+  routes      Route[]
+  trips       Trip[]
+  drivers     Driver[]
+  incidents   SafetyIncident[]
+  enrollments SchoolEnrollment[]
+}
+
+model SchoolStaff {
+  id          String  @id @default(cuid())
+  schoolId    String
+  userId      String
+  title       String?
+  permissions String? // JSON array
+  isActive    Boolean @default(true)
+  createdAt   DateTime @default(now())
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([schoolId, userId])
+}
+
+model Student {
+  id            String   @id @default(cuid())
+  firstName     String
+  lastName      String
+  photoUrl      String?
+  dateOfBirth   DateTime?
+  gender        String?
+  grade         String
+  classroom     String?
+  schoolId      String
+  homeAddressId String?
+  notes         String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  school           School                  @relation(fields: [schoolId], references: [id])
+  homeAddress      Address?                @relation(fields: [homeAddressId], references: [id])
+  guardians        GuardianRelationship[]
+  enrollments      SchoolEnrollment[]
+  emergencyContacts EmergencyContact[]
+  pickupPersons    AuthorizedPickupPerson[]
+  subscriptions    Subscription[]
+  routeStops       RouteStop[]
+  tripAssignments  StudentTripAssignment[]
+  boardingEvents   BoardingEvent[]
+  dropoffEvents    DropoffEvent[]
+  incidents        SafetyIncident[]
+
+  @@index([schoolId])
+}
+
+model SchoolEnrollment {
+  id           String   @id @default(cuid())
+  studentId    String
+  schoolId     String
+  academicYear String
+  grade        String
+  classroom    String?
+  status       String   @default("ACTIVE")
+  createdAt    DateTime @default(now())
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  school  School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, schoolId, academicYear])
+}
+
+// ---------------------------------------------------------------------------
+// Subscriptions, billing
+// ---------------------------------------------------------------------------
+
+model SubscriptionPlan {
+  id           String  @id @default(cuid())
+  name         String
+  planType     String // MONTHLY | TERM | ANNUAL
+  serviceType  String // ONE_WAY | ROUND_TRIP
+  basePrice    Float
+  perKmPrice   Float   @default(0)
+  zone         String?
+  maxDistanceKm Float?
+  siblingDiscountPercent Int @default(0)
+  description  String?
+  isActive     Boolean @default(true)
+  createdAt    DateTime @default(now())
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id           String  @id @default(cuid())
+  parentId     String
+  studentId    String
+  planId       String
+  status       String  @default("PENDING") // PENDING|ACTIVE|PAUSED|EXPIRED|CANCELLED|OVERDUE
+  startDate    DateTime
+  endDate      DateTime
+  autoRenew    Boolean @default(false)
+  priceEGP     Float
+  discountEGP  Float   @default(0)
+  promoCode    String?
+  pausedFrom   DateTime?
+  pausedTo     DateTime?
+  cancelledAt  DateTime?
+  cancelReason String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  parent       User               @relation("SubscriptionParent", fields: [parentId], references: [id])
+  student      Student            @relation(fields: [studentId], references: [id])
+  plan         SubscriptionPlan   @relation(fields: [planId], references: [id])
+  payments     Payment[]
+  invoices     Invoice[]
+
+  @@index([parentId])
+  @@index([studentId])
+  @@index([status])
+}
+
+model Payment {
+  id             String   @id @default(cuid())
+  subscriptionId String?
+  parentId       String
+  amountEGP      Float
+  currency       String   @default("EGP")
+  method         String // CARD | CASH | WALLET | BANK_TRANSFER
+  status         String   @default("PENDING") // PENDING|SUCCEEDED|FAILED|REFUNDED
+  provider       String   @default("PAYMOB")
+  providerRef    String?
+  idempotencyKey String?  @unique
+  failureReason  String?
+  paidAt         DateTime?
+  createdAt      DateTime @default(now())
+
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+  parent       User          @relation(fields: [parentId], references: [id])
+  refunds      Refund[]
+
+  @@index([parentId])
+  @@index([status])
+}
+
+model Invoice {
+  id             String   @id @default(cuid())
+  subscriptionId String
+  parentId       String
+  number         String   @unique
+  amountEGP      Float
+  taxEGP         Float    @default(0)
+  totalEGP       Float
+  status         String   @default("ISSUED") // ISSUED|PAID|VOID|OVERDUE
+  dueDate        DateTime
+  issuedAt       DateTime @default(now())
+  paidAt         DateTime?
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  parent       User         @relation(fields: [parentId], references: [id])
+
+  @@index([parentId])
+}
+
+model Refund {
+  id          String   @id @default(cuid())
+  paymentId   String
+  amountEGP   Float
+  reason      String?
+  status      String   @default("PENDING") // PENDING|PROCESSED|REJECTED
+  processedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  payment Payment @relation(fields: [paymentId], references: [id])
+}
+
+model PromoCode {
+  id              String    @id @default(cuid())
+  code            String    @unique
+  discountPercent Int?
+  discountEGP     Float?
+  maxUses         Int?
+  uses            Int       @default(0)
+  activeFrom      DateTime?
+  activeTo        DateTime?
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Fleet, drivers, routes, trips
+// ---------------------------------------------------------------------------
+
+model Bus {
+  id              String   @id @default(cuid())
+  code            String   @unique
+  plateNumber     String   @unique
+  make            String?
+  model           String?
+  year            Int?
+  capacity        Int
+  status          String   @default("ACTIVE") // ACTIVE|MAINTENANCE|INACTIVE
+  gpsDeviceId     String?
+  insuranceExpiry DateTime?
+  inspectionExpiry DateTime?
+  createdAt       DateTime @default(now())
+
+  drivers         Driver[]
+  vehicles        Vehicle[]
+  trips           Trip[]
+  gpsUpdates      GpsLocationUpdate[]
+  tripAssignments TripAssignment[]
+}
+
+model Vehicle {
+  id              String   @id @default(cuid())
+  busId           String
+  make            String
+  model           String
+  year            Int
+  plateNumber     String
+  insuranceExpiry DateTime?
+  inspectionExpiry DateTime?
+  createdAt       DateTime @default(now())
+
+  bus Bus @relation(fields: [busId], references: [id], onDelete: Cascade)
+}
+
+model Driver {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  licenseNumber String
+  licenseExpiry DateTime
+  status        String   @default("PENDING") // PENDING|VERIFIED|SUSPENDED|REJECTED
+  rating        Float    @default(5)
+  totalTrips    Int      @default(0)
+  busId         String?
+  schoolId      String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bus            Bus?             @relation(fields: [busId], references: [id])
+  school         School?          @relation(fields: [schoolId], references: [id])
+  trips          Trip[]
+  tripAssignments TripAssignment[]
+  boardingEvents BoardingEvent[]
+  dropoffEvents  DropoffEvent[]
+}
+
+model Route {
+  id             String   @id @default(cuid())
+  name           String
+  schoolId       String
+  direction      String // MORNING | AFTERNOON
+  distanceKm     Float    @default(0)
+  estDurationMin Int      @default(0)
+  status         String   @default("ACTIVE")
+  createdAt      DateTime @default(now())
+
+  school School      @relation(fields: [schoolId], references: [id])
+  stops  RouteStop[]
+  trips  Trip[]
+
+  @@index([schoolId])
+}
+
+model RouteStop {
+  id            String   @id @default(cuid())
+  routeId       String
+  studentId     String?
+  sequence      Int
+  stopType      String // PICKUP | DROPOFF
+  lat           Float
+  lng           Float
+  addressLabel  String
+  scheduledTime String?
+  notes         String?
+  createdAt     DateTime @default(now())
+
+  route   Route    @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  student Student? @relation(fields: [studentId], references: [id])
+
+  @@index([routeId])
+}
+
+model Trip {
+  id                    String    @id @default(cuid())
+  routeId               String
+  driverId              String
+  busId                 String
+  schoolId              String
+  direction             String // MORNING | AFTERNOON
+  tripDate              DateTime
+  status                String    @default("SCHEDULED") // SCHEDULED|IN_PROGRESS|COMPLETED|CANCELLED|ABORTED
+  startedAt             DateTime?
+  endedAt               DateTime?
+  reconciliationComplete Boolean  @default(false)
+  note                  String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  route              Route                   @relation(fields: [routeId], references: [id])
+  driver             Driver                  @relation(fields: [driverId], references: [id])
+  bus                Bus                     @relation(fields: [busId], references: [id])
+  school             School                  @relation(fields: [schoolId], references: [id])
+  assignments        TripAssignment[]
+  studentAssignments StudentTripAssignment[]
+  gpsUpdates         GpsLocationUpdate[]
+  boardingEvents     BoardingEvent[]
+  dropoffEvents      DropoffEvent[]
+  incidents          SafetyIncident[]
+
+  @@index([tripDate])
+  @@index([driverId])
+  @@index([status])
+}
+
+model TripAssignment {
+  id            String   @id @default(cuid())
+  tripId        String
+  busId         String
+  driverId      String
+  isReplacement Boolean  @default(false)
+  reason        String?
+  createdAt     DateTime @default(now())
+
+  trip   Trip   @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  bus    Bus    @relation(fields: [busId], references: [id])
+  driver Driver @relation(fields: [driverId], references: [id])
+}
+
+model StudentTripAssignment {
+  id           String    @id @default(cuid())
+  tripId       String
+  studentId    String
+  status       String    @default("EXPECTED") // EXPECTED|ONBOARD|DROPPED|ABSENT|MISSED|UNACCOUNTED
+  expectedStopId String?
+  seatNo       String?
+  boardedAt    DateTime?
+  droppedAt    DateTime?
+  recipientId  String?
+  recipientName String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  trip    Trip    @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([tripId, studentId])
+  @@index([studentId])
+}
+
+model GpsLocationUpdate {
+  id         String   @id @default(cuid())
+  tripId     String
+  busId      String
+  lat        Float
+  lng        Float
+  speed      Float?
+  heading    Float?
+  accuracy   Float?
+  source     String   @default("DRIVER_APP")
+  recordedAt DateTime @default(now())
+
+  trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  bus  Bus  @relation(fields: [busId], references: [id])
+
+  @@index([tripId, recordedAt])
+  @@index([busId])
+}
+
+model BoardingEvent {
+  id         String   @id @default(cuid())
+  tripId     String
+  studentId  String
+  driverId   String
+  lat        Float?
+  lng        Float?
+  method     String   @default("MANUAL") // MANUAL | PIN | QR
+  occurredAt DateTime @default(now())
+
+  trip    Trip    @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  student Student @relation(fields: [studentId], references: [id])
+  driver  Driver  @relation(fields: [driverId], references: [id])
+
+  @@index([tripId])
+}
+
+model DropoffEvent {
+  id            String   @id @default(cuid())
+  tripId        String
+  studentId     String
+  driverId      String
+  recipientId   String?
+  recipientName String?
+  lat           Float?
+  lng           Float?
+  method        String   @default("MANUAL")
+  occurredAt    DateTime @default(now())
+
+  trip    Trip    @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  student Student @relation(fields: [studentId], references: [id])
+  driver  Driver  @relation(fields: [driverId], references: [id])
+
+  @@index([tripId])
+}
+
+model AuthorizedPickupPerson {
+  id        String   @id @default(cuid())
+  studentId String
+  name      String
+  relation  String
+  phone     String
+  idNumber  String?
+  photoUrl  String?
+  pin       String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+}
+
+model EmergencyContact {
+  id        String   @id @default(cuid())
+  studentId String
+  name      String
+  relation  String
+  phone     String
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String
+  data      String? // JSON
+  severity  String   @default("INFO") // INFO | WARNING | CRITICAL | SUCCESS
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user    User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  logs    NotificationDeliveryLog[]
+
+  @@index([userId, readAt])
+  @@index([createdAt])
+}
+
+model NotificationPreference {
+  id               String  @id @default(cuid())
+  userId           String  @unique
+  emailEnabled     Boolean @default(true)
+  smsEnabled       Boolean @default(false)
+  pushEnabled      Boolean @default(true)
+  whatsappEnabled  Boolean @default(false)
+  before10         Boolean @default(true)
+  before5          Boolean @default(true)
+  arrivalAlert     Boolean @default(true)
+  boardedAlert     Boolean @default(true)
+  schoolArrival    Boolean @default(true)
+  droppedHome      Boolean @default(true)
+  delayAlerts      Boolean @default(true)
+  quietHoursFrom   String?
+  quietHoursTo     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model NotificationDeliveryLog {
+  id             String   @id @default(cuid())
+  notificationId String
+  channel        String // IN_APP | PUSH | EMAIL | SMS | WHATSAPP
+  status         String   @default("PENDING") // PENDING|SENT|FAILED|SKIPPED
+  providerRef    String?
+  error          String?
+  sentAt         DateTime?
+  createdAt      DateTime @default(now())
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  @@index([notificationId])
+}
+
+// ---------------------------------------------------------------------------
+// Support & safety
+// ---------------------------------------------------------------------------
+
+model SupportTicket {
+  id          String   @id @default(cuid())
+  requesterId String
+  category    String
+  subject     String
+  body        String
+  status      String   @default("OPEN") // OPEN|IN_PROGRESS|WAITING|RESOLVED|CLOSED
+  priority    String   @default("NORMAL") // LOW|NORMAL|HIGH|URGENT
+  assigneeId  String?
+  resolution  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  requester User            @relation("TicketRequester", fields: [requesterId], references: [id])
+  assignee  User?           @relation("TicketAssignee", fields: [assigneeId], references: [id])
+  messages  TicketMessage[]
+
+  @@index([status])
+}
+
+model TicketMessage {
+  id        String   @id @default(cuid())
+  ticketId  String
+  authorId  String
+  body      String
+  createdAt DateTime @default(now())
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author User          @relation(fields: [authorId], references: [id])
+}
+
+model SafetyIncident {
+  id           String    @id @default(cuid())
+  tripId       String?
+  studentId    String?
+  schoolId     String?
+  reportedById String
+  type         String // BREAKDOWN | DELAY | ACCIDENT | ABSENT | MISSING_CHILD | ROUTE_DEVIATION | SOS | OTHER
+  severity     String    @default("MEDIUM") // LOW|MEDIUM|HIGH|CRITICAL
+  description  String
+  lat          Float?
+  lng          Float?
+  status       String    @default("OPEN") // OPEN|ACKNOWLEDGED|RESOLVED
+  escalatedTo  String?
+  resolvedAt   DateTime?
+  createdAt    DateTime  @default(now())
+
+  trip       Trip?    @relation(fields: [tripId], references: [id])
+  student    Student? @relation(fields: [studentId], references: [id])
+  school     School?  @relation(fields: [schoolId], references: [id])
+  reportedBy User     @relation("IncidentReporter", fields: [reportedById], references: [id])
+
+  @@index([status])
+  @@index([severity])
+}
+
+// ---------------------------------------------------------------------------
+// Audit & auth tokens
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  entity    String
+  entityId  String?
+  metadata  String? // JSON
+  ip        String?
+  createdAt DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+}
+
+model OtpToken {
+  id         String    @id @default(cuid())
+  userId     String?
+  phone      String
+  codeHash   String
+  purpose    String    @default("PHONE_VERIFICATION")
+  expiresAt  DateTime
+  consumedAt DateTime?
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([phone])
+}
+
+model PasswordResetToken {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}

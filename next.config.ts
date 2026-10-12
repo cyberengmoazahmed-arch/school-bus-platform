@@ -1,7 +1,6 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
   turbopack: {
@@ -12,6 +11,9 @@ const nextConfig: NextConfig = {
       },
     },
   },
+  // Prisma's libSQL adapter and bcrypt rely on native/node modules that must
+  // not be bundled by the server compiler.
+  serverExternalPackages: ["@libsql/client", "@prisma/adapter-libsql", "bcryptjs"],
 };
 
 export default nextConfig;

@@ -1,0 +1,32 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Creates a single web service that runs the Docker image and syncs the
+# Prisma schema to Turso on boot via start.sh.
+services:
+  - type: web
+    name: saferide
+    runtime: docker
+    # Update to your repo URL after pushing to GitHub:
+    repo: https://github.com/cyberengmoazahmed-arch/school-bus-platform
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /login
+    envVars:
+      - key: DATABASE_URL
+        sync: false # set to libsql://<db>.turso.io in the dashboard
+      - key: DATABASE_AUTH_TOKEN
+        sync: false # set to your Turso database token
+      - key: AUTH_SECRET
+        sync: false # openssl rand -hex 32
+      - key: AUTH_DEV_OTP
+        value: "false"
+      - key: AUTH_SESSION_TTL
+        value: "604800"
+      - key: NEXT_PUBLIC_APP_NAME
+        value: "SafeRide"
+      - key: NEXT_PUBLIC_DEFAULT_LOCALE
+        value: "en"
+      - key: NEXT_PUBLIC_MAPS_PROVIDER
+        value: "osm"
+      - key: PAYMENTS_MODE
+        value: "sandbox"
+      - key: PAYMOB_BASE_URL
+        value: "https://accept.paymob.com/api"

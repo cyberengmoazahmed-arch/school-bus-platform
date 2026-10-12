@@ -32,6 +32,19 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+
+# local sqlite database (libsql sidecar files)
+/prisma/*.db
+/prisma/*.db-*
+/prisma/*.db-shm
+/prisma/*.db-wal
+
+# local AI agent tooling directories
+/.agents/
+/.claude/
+/.windsurf/
+/skills-lock.json
 
 # vercel
 .vercel
@@ -39,3 +52,5 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/src/generated/prisma
