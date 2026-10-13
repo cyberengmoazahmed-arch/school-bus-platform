@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useRef, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Radio, Play, Flag, AlertTriangle, Loader2 } from "lucide-react";
+import { Radio, Play, Flag, AlertTriangle, Loader2, MapPin } from "lucide-react";
 import {
   startTripAction,
   endTripAction,
@@ -53,6 +53,8 @@ export function DriverToday({ locale, driverName, trips }: { locale: Locale; dri
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [gpsBusy, setGpsBusy] = useState(false);
+  const [liveOn, setLiveOn] = useState(false);
+  const [localFix, setLocalFix] = useState<{ lat: number; lng: number; speed: number | null } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -63,7 +65,12 @@ export function DriverToday({ locale, driverName, trips }: { locale: Locale; dri
   };
 
   const active = trips.find((t) => t.status === "IN_PROGRESS") ?? trips[0];
-  const selected = trips.find((t) => t.id === (active?.id ?? "")) ?? active;
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = trips.find((t) => t.id === selectedId) ?? active ?? trips[0];
+
+  useEffect(() => {
+    if (active) setSelectedId(active.id);
+  }, [active?.id, trips.length]);
 
   const run = (fn: () => Promise<unknown>, okMsg?: string) =>
     startTransition(async () => {
@@ -80,47 +87,95 @@ export function DriverToday({ locale, driverName, trips }: { locale: Locale; dri
       }
     });
 
-  // --- GPS simulation -----------------------------------------------------
-  const sendGps = async (lat: number, lng: number, speed: number | null) => {
-    if (!selected) return;
+  // --- GPS (real device GPS streaming, with simulator fallback) ------------
+  const lastFixRef = useRef<{ lat: number; lng: number; speed: number | null } | null>(null);
+  const lastSentRef = useRef<string>("");
+
+  const sendGps = async (tripId: string, lat: number, lng: number, speed: number | null, heading: number | null = null) => {
     setGpsBusy(true);
-    const res = await gpsPingAction(selected.id, { lat, lng, speed, heading: null });
+    const res = await gpsPingAction(tripId, { lat, lng, speed, heading });
     setGpsBusy(false);
     if (res.ok) {
+      lastSentRef.current = `${lat},${lng}`;
+      setLocalFix({ lat, lng, speed });
       show("GPS fix recorded.");
-      router.refresh();
     } else {
       show(`GPS failed: ${res.error}`);
     }
   };
 
+  // Continuous live GPS. Throttles uploads: on every distinct position fix
+  // plus a heartbeat every 5s, only while the selected trip is in progress.
+  useEffect(() => {
+    if (!liveOn) return;
+    if (!selected || selected.status !== "IN_PROGRESS") return;
+    let cancelled = false;
+    const push = (pos: { lat: number; lng: number; speed: number | null }) => {
+      if (cancelled) return;
+      lastFixRef.current = pos;
+      const key = `${pos.lat},${pos.lng}`;
+      if (key === lastSentRef.current) return;
+      void sendGps(selected.id, pos.lat, pos.lng, pos.speed);
+    };
+    const watchId = navigator.geolocation.watchPosition(
+      (p) => push({ lat: p.coords.latitude, lng: p.coords.longitude, speed: p.coords.speed != null ? Math.round(p.coords.speed) : null }),
+      () => { /* keep last fix */ },
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 },
+    );
+    const heartbeat = setInterval(() => {
+      if (lastFixRef.current) push(lastFixRef.current);
+    }, 5000);
+    return () => {
+      cancelled = true;
+      navigator.geolocation.clearWatch(watchId);
+      clearInterval(heartbeat);
+    };
+  }, [liveOn, selected?.id, selected?.status]);
+
+  const startLive = () => {
+    if (!selected || selected.status !== "IN_PROGRESS") return show("Trip must be in progress to stream GPS.");
+    if (!("geolocation" in navigator)) return show("This device has no GPS hardware — use 'Simulate ping' instead.");
+    navigator.geolocation.getCurrentPosition(
+      (p) => {
+        lastFixRef.current = { lat: p.coords.latitude, lng: p.coords.longitude, speed: p.coords.speed != null ? Math.round(p.coords.speed) : null };
+        setLiveOn(true);
+        void sendGps(selected.id, lastFixRef.current.lat, lastFixRef.current.lng, lastFixRef.current.speed);
+      },
+      () => show("GPS permission denied — use 'Simulate ping' instead."),
+      { enableHighAccuracy: true, timeout: 8000 },
+    );
+  };
+
   const simulateGps = () => {
+    if (!selected) return;
     if (!("geolocation" in navigator)) return pingFallback();
     navigator.geolocation.getCurrentPosition(
-      (pos) => void sendGps(pos.coords.latitude, pos.coords.longitude, Math.round(pos.coords.speed ?? 0)),
+      (pos) => void sendGps(selected.id, pos.coords.latitude, pos.coords.longitude, Math.round(pos.coords.speed ?? 0)),
       () => pingFallback(),
       { enableHighAccuracy: true, timeout: 6000 },
     );
   };
 
   const pingFallback = () => {
-    const base = selected?.gps ?? { lat: CAIRO.lat, lng: CAIRO.lng };
+    if (!selected) return;
+    const base = selected.gps ?? { lat: CAIRO.lat, lng: CAIRO.lng };
     const lat = base.lat + (Math.random() - 0.5) * 0.0009;
     const lng = base.lng + (Math.random() - 0.5) * 0.0009;
-    void sendGps(lat, lng, 24 + Math.random() * 28);
+    void sendGps(selected.id, lat, lng, 24 + Math.random() * 28);
   };
   // -------------------------------------------------------------------------
 
   const markers = useMemo<MapMarker[]>(() => {
     if (!selected) return [];
+    const gpsFix = localFix ?? selected.gps;
     const list: MapMarker[] = [];
-    if (selected.gps)
+    if (gpsFix)
       list.push({
         id: "bus",
-        lat: selected.gps.lat,
-        lng: selected.gps.lng,
+        lat: gpsFix.lat,
+        lng: gpsFix.lng,
         label: selected.busCode,
-        sublabel: `${Math.round(selected.gps.speed ?? 0)} km/h`,
+        sublabel: `${Math.round(gpsFix.speed ?? 0)} km/h`,
         kind: "bus",
       });
     for (const s of selected.stops.slice(0, 4))
@@ -129,7 +184,7 @@ export function DriverToday({ locale, driverName, trips }: { locale: Locale; dri
       if (a.homeLat != null && a.homeLng != null && a.status === "EXPECTED")
         list.push({ id: `home:${a.studentId}`, lat: a.homeLat, lng: a.homeLng, label: a.name, kind: "home" });
     return list;
-  }, [selected]);
+  }, [selected, localFix]);
 
   const counts = useMemo(() => {
     if (!selected) return { onboard: 0, dropped: 0, expected: 0, absent: 0, unaccounted: 0 };
@@ -155,7 +210,7 @@ export function DriverToday({ locale, driverName, trips }: { locale: Locale; dri
     );
   }
 
-  const center = selected.gps ? { lat: selected.gps.lat, lng: selected.gps.lng } : CAIRO;
+  const center = localFix ? { lat: localFix.lat, lng: localFix.lng } : selected.gps ? { lat: selected.gps.lat, lng: selected.gps.lng } : CAIRO;
   const open = selected.status === "IN_PROGRESS";
 
   return (
@@ -171,7 +226,7 @@ export function DriverToday({ locale, driverName, trips }: { locale: Locale; dri
         </div>
         <div className="flex flex-wrap gap-2">
           {trips.map((t) => (
-            <Button key={t.id} variant={t.id === selected.id ? "primary" : "outline"} size="sm" onClick={() => router.refresh()}>
+            <Button key={t.id} variant={t.id === selected.id ? "primary" : "outline"} size="sm" onClick={() => setSelectedId(t.id)}>
               {t.direction === "MORNING" ? "Morning" : "Afternoon"} · {relativeTime(t.tripDate, locale).replace(" ago", "")}
             </Button>
           ))}
@@ -216,9 +271,15 @@ export function DriverToday({ locale, driverName, trips }: { locale: Locale; dri
                   >
                     <Flag size={16} /> Complete trip
                   </Button>
-                  <Button size="md" className="w-full" variant="outline" disabled={gpsBusy} onClick={simulateGps}>
-                    {gpsBusy ? <Loader2 size={16} className="animate-spin" /> : <Radio size={16} />} Simulate GPS ping
-                  </Button>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <Button size="md" className="w-full" variant={liveOn ? "primary" : "outline"} disabled={gpsBusy} onClick={() => (liveOn ? setLiveOn(false) : startLive())}>
+                      {gpsBusy ? <Loader2 size={16} className="animate-spin" /> : liveOn ? <Radio size={16} /> : <MapPin size={16} />}
+                      {liveOn ? "Live GPS — ON" : "Start live GPS"}
+                    </Button>
+                    <Button size="md" className="w-full" variant="ghost" disabled={gpsBusy || liveOn} onClick={simulateGps}>
+                      Simulate ping
+                    </Button>
+                  </div>
                 </>
               ) : null}
             </div>
